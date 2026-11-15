@@ -1,0 +1,6 @@
+{
+  "name": "Najdłuższe Połączenia PKP PLK",
+  "description": "Zestawienie i interaktywny przegląd najdłuższych połączeń kolejowych w Polsce na bazie otwartych danych PKP PLK (trasy, dystans w km, czas przejazdu, godziny odjazdu i przyjazdu).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
