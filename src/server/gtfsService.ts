@@ -11,6 +11,10 @@ import type {
   RouteStop,
   SpeedSegmentRecord,
   SpeedsResponse,
+  StationDailySummary,
+  StationScheduleResponse,
+  StationStopEvent,
+  StationsTrafficResponse,
 } from '../types/railway.ts';
 
 const GTFS_FEED_URL = 'https://mkuran.pl/gtfs/polish_trains.zip';
@@ -37,6 +41,7 @@ interface StopMeta {
   lat: number | null;
   lon: number | null;
   country: string | null;
+  parentStation: string | null;
 }
 
 interface AgencyMeta {
@@ -88,7 +93,10 @@ interface CacheEntry<T> {
 
 const dateResultsCache = new Map<string, CacheEntry<ConnectionsResponse>>();
 const speedsResultsCache = new Map<string, CacheEntry<SpeedsResponse>>();
+const slowestResultsCache = new Map<string, CacheEntry<SpeedsResponse>>();
 const longestSegmentsResultsCache = new Map<string, CacheEntry<LongestSegmentsResponse>>();
+const stationsTrafficCache = new Map<string, CacheEntry<StationsTrafficResponse>>();
+const stationScheduleCache = new Map<string, CacheEntry<StationScheduleResponse>>();
 const tripDetailsCache = new Map<string, CacheEntry<LongestConnection>>();
 let lastFeedDownloadMs = 0;
 let activeDownloadPromise: Promise<void> | null = null;
@@ -400,6 +408,7 @@ function readStops(zip: AdmZip): Map<string, StopMeta> {
       lat: Number.isFinite(latRaw) ? latRaw : null,
       lon: Number.isFinite(lonRaw) ? lonRaw : null,
       country: parts[cols.country]?.trim() || null,
+      parentStation: parts[cols.parent_station]?.trim() || null,
     });
   });
 
@@ -1188,6 +1197,184 @@ export async function fetchFastestSegments(
   return result;
 }
 
+export async function fetchSlowestSegments(
+  requestedDate?: string,
+  forceRefresh = false,
+): Promise<SpeedsResponse> {
+  const date =
+    requestedDate && /^\d{4}-\d{2}-\d{2}$/.test(requestedDate)
+      ? requestedDate
+      : getTodayWarsawDate();
+
+  const now = Date.now();
+  const cached = slowestResultsCache.get(date);
+  if (!forceRefresh && cached && cached.expiresAt > now) {
+    return { ...cached.value, fromCache: true };
+  }
+
+  const diskCachePath = path.join(CACHE_DIR, `slowest-segments-v1-${date}.json`);
+  if (!forceRefresh) {
+    try {
+      const stat = await fs.promises.stat(diskCachePath);
+      if (now - stat.mtimeMs < DATE_RESULT_TTL_MS) {
+        const rawJson = await fs.promises.readFile(diskCachePath, 'utf8');
+        const parsed = JSON.parse(rawJson) as SpeedsResponse;
+        slowestResultsCache.set(date, {
+          value: parsed,
+          expiresAt: stat.mtimeMs + DATE_RESULT_TTL_MS,
+        });
+        return { ...parsed, fromCache: true };
+      }
+    } catch {
+      // Cache miss
+    }
+  }
+
+  const zip = await openZipArchive(forceRefresh);
+  const { feedMeta, built } = loadActiveDayBuiltTrips(zip, date);
+
+  const allSegments: SpeedSegmentRecord[] = [];
+  for (const item of built) {
+    for (const seg of item.segments) {
+      allSegments.push(seg);
+    }
+  }
+  allSegments.sort((a, b) => a.avgSpeedKmh - b.avgSpeedKmh || b.distanceKm - a.distanceKm);
+
+  const selectedSegmentsMap = new Map<string, SpeedSegmentRecord>();
+  const addBottom = (predicate: (s: SpeedSegmentRecord) => boolean, limit: number) => {
+    let added = 0;
+    for (const s of allSegments) {
+      if (!predicate(s)) continue;
+      if (!selectedSegmentsMap.has(s.id)) {
+        selectedSegmentsMap.set(s.id, s);
+      }
+      added += 1;
+      if (added >= limit) break;
+    }
+  };
+
+  addBottom(() => true, 140);
+  addBottom((s) => s.distanceKm >= 5, 100);
+  addBottom((s) => s.distanceKm >= 10, 120);
+  addBottom((s) => s.distanceKm >= 25, 100);
+  addBottom((s) => s.distanceKm >= 50, 100);
+  addBottom((s) => s.isDomestic && s.distanceKm >= 10, 80);
+  addBottom((s) => !s.isDomestic && s.distanceKm >= 10, 60);
+
+  const carrierCodes = Array.from(new Set(built.map((b) => b.connection.carrierCode)));
+  const categoryGroups: CategoryGroup[] = [
+    'EIP',
+    'EIC_EC',
+    'IC',
+    'TLK_IR',
+    'ACCELERATED',
+    'LOCAL',
+  ];
+
+  for (const code of carrierCodes) {
+    addBottom((s) => s.carrierCode === code, 45);
+    addBottom((s) => s.carrierCode === code && s.distanceKm >= 10, 45);
+  }
+
+  for (const grp of categoryGroups) {
+    addBottom((s) => s.categoryGroup === grp, 45);
+    addBottom((s) => s.categoryGroup === grp && s.distanceKm >= 10, 45);
+  }
+
+  for (const code of carrierCodes) {
+    for (const grp of categoryGroups) {
+      addBottom((s) => s.carrierCode === code && s.categoryGroup === grp && s.distanceKm >= 10, 20);
+    }
+  }
+
+  const segments = Array.from(selectedSegmentsMap.values()).sort(
+    (a, b) => a.avgSpeedKmh - b.avgSpeedKmh || b.distanceKm - a.distanceKm,
+  );
+
+  const sortedFullBySlowest = [...built].sort(
+    (a, b) => a.connection.avgSpeedKmh - b.connection.avgSpeedKmh || b.connection.distanceKm - a.connection.distanceKm,
+  );
+  const selectedRoutesMap = new Map<string, (typeof built)[number]>();
+  const addBottomRoutes = (predicate: (c: LongestConnection) => boolean, limit: number) => {
+    let added = 0;
+    for (const item of sortedFullBySlowest) {
+      if (!predicate(item.connection)) continue;
+      selectedRoutesMap.set(item.connection.id, item);
+      added += 1;
+      if (added >= limit) break;
+    }
+  };
+
+  addBottomRoutes(() => true, 100);
+  addBottomRoutes((c) => c.distanceKm >= 10, 100);
+  addBottomRoutes((c) => c.distanceKm >= 50, 80);
+  addBottomRoutes((c) => c.isDomestic && c.distanceKm >= 10, 60);
+  addBottomRoutes((c) => !c.isDomestic && c.distanceKm >= 10, 40);
+  for (const code of carrierCodes) {
+    addBottomRoutes((c) => c.carrierCode === code, 30);
+  }
+  for (const grp of categoryGroups) {
+    addBottomRoutes((c) => c.categoryGroup === grp, 30);
+  }
+
+  const neededShapeIds = new Set<string>();
+  for (const item of selectedRoutesMap.values()) {
+    if (item.shapeId) neededShapeIds.add(item.shapeId);
+  }
+  const shapesMap = readShapesForIds(zip, neededShapeIds);
+
+  const fullRoutes = Array.from(selectedRoutesMap.values())
+    .map(({ connection, shapeId }) => {
+      const pts = shapeId ? shapesMap.get(shapeId) : undefined;
+      return pts && pts.length >= 2 ? { ...connection, shapePoints: pts } : connection;
+    })
+    .sort((a, b) => a.avgSpeedKmh - b.avgSpeedKmh || b.distanceKm - a.distanceKm);
+
+  const carrierCounts = new Map<string, { name: string; count: number }>();
+  for (const c of built) {
+    const code = c.connection.carrierCode;
+    const existing = carrierCounts.get(code);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      carrierCounts.set(code, { name: c.connection.carrierName, count: 1 });
+    }
+  }
+  const carriers: CarrierSummary[] = Array.from(carrierCounts.entries())
+    .map(([code, meta]) => ({ code, name: meta.name, count: meta.count }))
+    .sort((a, b) => b.count - a.count);
+
+  const result: SpeedsResponse = {
+    date,
+    fetchedAt: new Date().toISOString(),
+    fromCache: false,
+    sourceName: 'Polish Trains GTFS (mkuran.pl)',
+    feedDateRange:
+      feedMeta.startDate && feedMeta.endDate
+        ? { from: feedMeta.startDate, to: feedMeta.endDate }
+        : null,
+    totalAnalyzedRoutes: built.length,
+    totalAnalyzedSegments: allSegments.length,
+    segments,
+    fullRoutes,
+    carriers,
+  };
+
+  slowestResultsCache.set(date, { value: result, expiresAt: now + DATE_RESULT_TTL_MS });
+
+  try {
+    await fs.promises.mkdir(CACHE_DIR, { recursive: true });
+    const tmpJsonPath = `${diskCachePath}.tmp`;
+    await fs.promises.writeFile(tmpJsonPath, JSON.stringify(result), 'utf8');
+    await fs.promises.rename(tmpJsonPath, diskCachePath);
+  } catch {
+    // Non-fatal
+  }
+
+  return result;
+}
+
 export async function fetchLongestSegments(
   requestedDate?: string,
   forceRefresh = false,
@@ -1368,4 +1555,400 @@ export async function fetchTripDetails(tripId: string): Promise<LongestConnectio
 
   tripDetailsCache.set(tripId, { value: fullConnection, expiresAt: now + DATE_RESULT_TTL_MS });
   return fullConnection;
+}
+
+function resolveCanonicalStation(
+  rawStopId: string,
+  stopsMap: Map<string, StopMeta>,
+): { stationId: string; meta: StopMeta | undefined } {
+  const rawMeta = stopsMap.get(rawStopId);
+  const stationId = rawMeta?.parentStation || rawStopId;
+  const canonicalMeta = stopsMap.get(stationId) ?? rawMeta;
+  return { stationId, meta: canonicalMeta };
+}
+
+export async function fetchStationsTraffic(
+  requestedDate?: string,
+  forceRefresh = false,
+): Promise<StationsTrafficResponse> {
+  const date =
+    requestedDate && /^\d{4}-\d{2}-\d{2}$/.test(requestedDate)
+      ? requestedDate
+      : getTodayWarsawDate();
+
+  const now = Date.now();
+  const cached = stationsTrafficCache.get(date);
+  if (!forceRefresh && cached && cached.expiresAt > now) {
+    return { ...cached.value, fromCache: true };
+  }
+
+  const diskCachePath = path.join(CACHE_DIR, `stations-traffic-v1-${date}.json`);
+  if (!forceRefresh) {
+    try {
+      const stat = await fs.promises.stat(diskCachePath);
+      if (now - stat.mtimeMs < DATE_RESULT_TTL_MS) {
+        const rawJson = await fs.promises.readFile(diskCachePath, 'utf8');
+        const parsed = JSON.parse(rawJson) as StationsTrafficResponse;
+        stationsTrafficCache.set(date, {
+          value: parsed,
+          expiresAt: stat.mtimeMs + DATE_RESULT_TTL_MS,
+        });
+        return { ...parsed, fromCache: true };
+      }
+    } catch {
+      // Cache miss
+    }
+  }
+
+  const zip = await openZipArchive(forceRefresh);
+  const feedMeta = readFeedMetadata(zip);
+  const targetYyyymmdd = date.replace(/-/g, '');
+  const activeServices = readActiveServicesForDate(zip, targetYyyymmdd);
+
+  if (activeServices.size === 0) {
+    const rangeHint =
+      feedMeta.startDate && feedMeta.endDate
+        ? `Aktualna paczka Polish Trains GTFS obejmuje okres od ${feedMeta.startDate} do ${feedMeta.endDate}.`
+        : 'Sprawdź wybraną datę.';
+    throw new GtfsServiceError(404, {
+      code: 'OUT_OF_RANGE',
+      message: `Brak kursów kolejowych w paczce GTFS dla daty ${date}.`,
+      details: rangeHint,
+    });
+  }
+
+  const agenciesMap = readAgencies(zip);
+  const routesMap = readRoutes(zip);
+  const stopsMap = readStops(zip);
+  const activeTrips = readActiveRailTrips(zip, activeServices, routesMap);
+  const stopTimesByTrip = readStopTimesForTrips(zip, activeTrips);
+
+  interface StationAcc {
+    stationId: string;
+    numericId: number;
+    name: string;
+    lat: number | null;
+    lon: number | null;
+    country: string | null;
+    seenTrips: Set<string>;
+    startingCount: number;
+    terminatingCount: number;
+    passThroughCount: number;
+    hourlyCounts: number[];
+    carrierCounts: Record<string, number>;
+  }
+
+  const stationMap = new Map<string, StationAcc>();
+  const globalCarrierTripCounts = new Map<string, { name: string; count: number }>();
+  let totalAnalyzedRoutes = 0;
+
+  for (const [tripId, trip] of activeTrips.entries()) {
+    const rows = stopTimesByTrip.get(tripId);
+    if (!rows || rows.length < 2) continue;
+    rows.sort((a, b) => a.stopSequence - b.stopSequence);
+    totalAnalyzedRoutes += 1;
+
+    const route = routesMap.get(trip.routeId);
+    const agency = route ? agenciesMap.get(route.agencyId) : undefined;
+    const carrierCode = route?.agencyId || 'INNY';
+    const carrierName = agency?.name || carrierCode;
+
+    const gc = globalCarrierTripCounts.get(carrierCode);
+    if (gc) gc.count += 1;
+    else globalCarrierTripCounts.set(carrierCode, { name: carrierName, count: 1 });
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const { stationId, meta } = resolveCanonicalStation(row.stopId, stopsMap);
+      let acc = stationMap.get(stationId);
+      if (!acc) {
+        acc = {
+          stationId,
+          numericId: meta?.numericId ?? stableNumericId(stationId),
+          name: meta?.name ?? stationId,
+          lat: meta?.lat ?? null,
+          lon: meta?.lon ?? null,
+          country: meta?.country ?? null,
+          seenTrips: new Set<string>(),
+          startingCount: 0,
+          terminatingCount: 0,
+          passThroughCount: 0,
+          hourlyCounts: new Array<number>(24).fill(0),
+          carrierCounts: {},
+        };
+        stationMap.set(stationId, acc);
+      }
+
+      if (acc.seenTrips.has(tripId)) continue;
+      acc.seenTrips.add(tripId);
+
+      const isOrigin = i === 0;
+      const isDestination = i === rows.length - 1;
+      if (isOrigin) acc.startingCount += 1;
+      else if (isDestination) acc.terminatingCount += 1;
+      else acc.passThroughCount += 1;
+
+      const eventSec = isDestination
+        ? (row.arrivalSeconds ?? row.departureSeconds)
+        : (row.departureSeconds ?? row.arrivalSeconds);
+      if (eventSec !== null) {
+        const hour = ((Math.floor(eventSec / 3600) % 24) + 24) % 24;
+        acc.hourlyCounts[hour] += 1;
+      }
+
+      acc.carrierCounts[carrierCode] = (acc.carrierCounts[carrierCode] ?? 0) + 1;
+    }
+  }
+
+  const stations: StationDailySummary[] = Array.from(stationMap.values())
+    .map((acc) => {
+      const totalTrains = acc.seenTrips.size;
+      let peakHour = 0;
+      let peakHourCount = 0;
+      for (let h = 0; h < 24; h++) {
+        if (acc.hourlyCounts[h] > peakHourCount) {
+          peakHourCount = acc.hourlyCounts[h];
+          peakHour = h;
+        }
+      }
+      const carriers = Object.entries(acc.carrierCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([code]) => code);
+
+      return {
+        stationId: acc.stationId,
+        numericId: acc.numericId,
+        name: acc.name,
+        lat: acc.lat,
+        lon: acc.lon,
+        country: acc.country,
+        isDomestic: !acc.country || acc.country === 'PL',
+        totalTrains,
+        startingCount: acc.startingCount,
+        terminatingCount: acc.terminatingCount,
+        passThroughCount: acc.passThroughCount,
+        peakHour,
+        peakHourCount,
+        hourlyCounts: acc.hourlyCounts,
+        carriers,
+        carrierCounts: acc.carrierCounts,
+      };
+    })
+    .sort((a, b) => b.totalTrains - a.totalTrains || a.name.localeCompare(b.name, 'pl'));
+
+  const carriers: CarrierSummary[] = Array.from(globalCarrierTripCounts.entries())
+    .map(([code, meta]) => ({ code, name: meta.name, count: meta.count }))
+    .sort((a, b) => b.count - a.count);
+
+  const result: StationsTrafficResponse = {
+    date,
+    fetchedAt: new Date().toISOString(),
+    fromCache: false,
+    sourceName: 'Polish Trains GTFS (mkuran.pl)',
+    feedDateRange:
+      feedMeta.startDate && feedMeta.endDate
+        ? { from: feedMeta.startDate, to: feedMeta.endDate }
+        : null,
+    totalActiveStations: stations.length,
+    totalAnalyzedRoutes,
+    stations,
+    carriers,
+  };
+
+  stationsTrafficCache.set(date, { value: result, expiresAt: now + DATE_RESULT_TTL_MS });
+
+  try {
+    await fs.promises.mkdir(CACHE_DIR, { recursive: true });
+    const tmpJsonPath = `${diskCachePath}.tmp`;
+    await fs.promises.writeFile(tmpJsonPath, JSON.stringify(result), 'utf8');
+    await fs.promises.rename(tmpJsonPath, diskCachePath);
+  } catch {
+    // Non-fatal
+  }
+
+  return result;
+}
+
+export async function fetchStationSchedule(
+  stationId: string,
+  requestedDate?: string,
+): Promise<StationScheduleResponse> {
+  const date =
+    requestedDate && /^\d{4}-\d{2}-\d{2}$/.test(requestedDate)
+      ? requestedDate
+      : getTodayWarsawDate();
+
+  const cacheKey = `${date}::${stationId}`;
+  const now = Date.now();
+  const cached = stationScheduleCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+
+  const zip = await openZipArchive(false);
+  const feedMeta = readFeedMetadata(zip);
+  const targetYyyymmdd = date.replace(/-/g, '');
+  const activeServices = readActiveServicesForDate(zip, targetYyyymmdd);
+
+  if (activeServices.size === 0) {
+    const rangeHint =
+      feedMeta.startDate && feedMeta.endDate
+        ? `Aktualna paczka Polish Trains GTFS obejmuje okres od ${feedMeta.startDate} do ${feedMeta.endDate}.`
+        : 'Sprawdź wybraną datę.';
+    throw new GtfsServiceError(404, {
+      code: 'OUT_OF_RANGE',
+      message: `Brak kursów kolejowych w paczce GTFS dla daty ${date}.`,
+      details: rangeHint,
+    });
+  }
+
+  const stopsMap = readStops(zip);
+  const canonicalStop = stopsMap.get(stationId);
+  if (!canonicalStop) {
+    throw new GtfsServiceError(404, {
+      code: 'STATION_NOT_FOUND',
+      message: `Nie znaleziono stacji ${stationId} w danych GTFS.`,
+    });
+  }
+
+  const matchingStopIds = new Set<string>([stationId]);
+  for (const [sid, meta] of stopsMap.entries()) {
+    if (meta.parentStation === stationId || sid === stationId) {
+      matchingStopIds.add(sid);
+    }
+  }
+
+  const agenciesMap = readAgencies(zip);
+  const routesMap = readRoutes(zip);
+  const activeTrips = readActiveRailTrips(zip, activeServices, routesMap);
+  const stopTimesByTrip = readStopTimesForTrips(zip, activeTrips);
+
+  const events: StationStopEvent[] = [];
+  const hourlyCounts = new Array<number>(24).fill(0);
+  let startingCount = 0;
+  let terminatingCount = 0;
+  let passThroughCount = 0;
+
+  for (const [tripId, trip] of activeTrips.entries()) {
+    const rows = stopTimesByTrip.get(tripId);
+    if (!rows || rows.length < 2) continue;
+
+    let hasStation = false;
+    for (const r of rows) {
+      if (matchingStopIds.has(r.stopId)) {
+        hasStation = true;
+        break;
+      }
+    }
+    if (!hasStation) continue;
+
+    rows.sort((a, b) => a.stopSequence - b.stopSequence);
+    const hitIdx = rows.findIndex((r) => matchingStopIds.has(r.stopId));
+    if (hitIdx < 0) continue;
+
+    const hitRow = rows[hitIdx];
+    const isOrigin = hitIdx === 0;
+    const isDestination = hitIdx === rows.length - 1;
+    const stopRole: StationStopEvent['stopRole'] = isOrigin
+      ? 'origin'
+      : isDestination
+        ? 'destination'
+        : 'through';
+
+    const eventSec = isDestination
+      ? (hitRow.arrivalSeconds ?? hitRow.departureSeconds)
+      : (hitRow.departureSeconds ?? hitRow.arrivalSeconds);
+    if (eventSec === null) continue;
+
+    const hour = ((Math.floor(eventSec / 3600) % 24) + 24) % 24;
+    const arrFormatted =
+      !isOrigin && hitRow.arrivalSeconds !== null
+        ? formatGtfsSeconds(hitRow.arrivalSeconds).hhmm
+        : null;
+    const depFormatted =
+      !isDestination && hitRow.departureSeconds !== null
+        ? formatGtfsSeconds(hitRow.departureSeconds).hhmm
+        : null;
+    const eventTime = formatGtfsSeconds(eventSec).hhmm;
+
+    let dwellMinutes: number | null = null;
+    if (
+      !isOrigin &&
+      !isDestination &&
+      hitRow.arrivalSeconds !== null &&
+      hitRow.departureSeconds !== null &&
+      hitRow.departureSeconds >= hitRow.arrivalSeconds
+    ) {
+      dwellMinutes = Math.round((hitRow.departureSeconds - hitRow.arrivalSeconds) / 60);
+    }
+
+    const firstMeta = resolveCanonicalStation(rows[0].stopId, stopsMap).meta;
+    const lastMeta = resolveCanonicalStation(rows[rows.length - 1].stopId, stopsMap).meta;
+    const isDomesticTrip = rows.every((r) => {
+      const m = stopsMap.get(r.stopId);
+      return !m?.country || m.country === 'PL';
+    });
+
+    const route = routesMap.get(trip.routeId);
+    const agency = route ? agenciesMap.get(route.agencyId) : undefined;
+    const carrierCode = route?.agencyId || 'INNY';
+    const carrierName = agency?.name || carrierCode;
+    const categorySymbol =
+      trip.categoryCode || hitRow.categoryCode || route?.shortName || carrierCode;
+    const categoryGroup = normalizeCategoryGroup(categorySymbol, route?.shortName ?? '');
+    const trainNumber =
+      trip.trainNumber || trip.shortName.split(' ')[0] || trip.tripId;
+
+    hourlyCounts[hour] += 1;
+    if (stopRole === 'origin') startingCount += 1;
+    else if (stopRole === 'destination') terminatingCount += 1;
+    else passThroughCount += 1;
+
+    events.push({
+      id: `${tripId}@${hitRow.stopSequence}`,
+      tripId,
+      trainNumber,
+      trainName: trip.trainName || null,
+      carrierCode,
+      carrierName,
+      categorySymbol,
+      categoryGroup,
+      originName: firstMeta?.name ?? rows[0].stopId,
+      destinationName: lastMeta?.name ?? rows[rows.length - 1].stopId,
+      arrivalTime: arrFormatted,
+      departureTime: depFormatted,
+      eventTime,
+      hour,
+      dwellMinutes,
+      platform: hitRow.platform,
+      track: hitRow.track,
+      stopRole,
+      isDomesticTrip,
+    });
+  }
+
+  events.sort(
+    (a, b) =>
+      a.hour - b.hour ||
+      a.eventTime.localeCompare(b.eventTime) ||
+      a.trainNumber.localeCompare(b.trainNumber),
+  );
+
+  const response: StationScheduleResponse = {
+    date,
+    stationId,
+    stationName: canonicalStop.name,
+    country: canonicalStop.country,
+    lat: canonicalStop.lat,
+    lon: canonicalStop.lon,
+    totalTrains: events.length,
+    startingCount,
+    terminatingCount,
+    passThroughCount,
+    hourlyCounts,
+    events,
+  };
+
+  stationScheduleCache.set(cacheKey, { value: response, expiresAt: now + DATE_RESULT_TTL_MS });
+  return response;
 }

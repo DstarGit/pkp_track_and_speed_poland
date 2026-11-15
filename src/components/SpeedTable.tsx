@@ -27,7 +27,7 @@ const COMPACT_CATEGORY_LABELS: Record<CategoryGroup, string> = {
 
 interface SpeedTableProps {
   mode: SpeedViewMode;
-  sortCriterion?: 'speed' | 'distance';
+  sortCriterion?: 'speed' | 'distance' | 'slowest';
   segments: SpeedSegmentWithFrequency[];
   fullRoutes: LongestConnection[];
   selectedSegmentId: string | null;
@@ -66,18 +66,24 @@ export const SpeedTable: React.FC<SpeedTableProps> = ({
           <h2 className="text-sm font-semibold text-slate-100 tracking-wide">
             {sortCriterion === 'distance'
               ? 'Najdłuższe odcinki bez postoju między stacjami (A → B)'
-              : mode === 'segments'
-                ? 'Najszybsze odcinki między stacjami (A → B)'
-                : 'Najszybsze całe trasy pociągów (Start → Koniec)'}
+              : sortCriterion === 'slowest'
+                ? mode === 'segments'
+                  ? 'Najwolniejsze odcinki między stacjami (A → B)'
+                  : 'Najwolniejsze całe trasy pociągów (Start → Koniec)'
+                : mode === 'segments'
+                  ? 'Najszybsze odcinki między stacjami (A → B)'
+                  : 'Najszybsze całe trasy pociągów (Start → Koniec)'}
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
             Sortowanie według:{' '}
             {sortCriterion === 'distance' ? (
               <span className="text-amber-400 font-medium">dystans odcinka (km)</span>
+            ) : sortCriterion === 'slowest' ? (
+              <span className="text-rose-400 font-medium">najniższa prędkość handlowa (km/h)</span>
             ) : (
               <span className="text-cyan-400 font-medium">prędkość handlowa (km/h)</span>
             )}
-            {sortCriterion === 'speed' && minDistanceKm > 0 && (
+            {(sortCriterion === 'speed' || sortCriterion === 'slowest') && minDistanceKm > 0 && (
               <>
                 {' '}
                 · próg min.{' '}
@@ -241,9 +247,11 @@ export const SpeedTable: React.FC<SpeedTableProps> = ({
 
                     <td
                       className={`py-2.5 pl-2 pr-3 text-right font-mono tabular-nums text-[13px] align-top whitespace-nowrap ${
-                        sortCriterion === 'speed'
-                          ? 'font-semibold text-cyan-400'
-                          : 'text-slate-300'
+                        sortCriterion === 'slowest'
+                          ? 'font-semibold text-rose-400'
+                          : sortCriterion === 'speed'
+                            ? 'font-semibold text-cyan-400'
+                            : 'text-slate-300'
                       }`}
                     >
                       {formatSpeedKmh(seg.avgSpeedKmh)}
@@ -330,7 +338,11 @@ export const SpeedTable: React.FC<SpeedTableProps> = ({
                       {formatDurationSeconds(conn.durationSeconds)}
                     </td>
 
-                    <td className="py-2.5 pl-2 pr-3 text-right font-mono tabular-nums text-[13px] align-top whitespace-nowrap font-semibold text-cyan-400">
+                    <td
+                      className={`py-2.5 pl-2 pr-3 text-right font-mono tabular-nums text-[13px] align-top whitespace-nowrap font-semibold ${
+                        sortCriterion === 'slowest' ? 'text-rose-400' : 'text-cyan-400'
+                      }`}
+                    >
                       {formatSpeedKmh(conn.avgSpeedKmh)}
                     </td>
                   </tr>

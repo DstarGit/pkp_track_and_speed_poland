@@ -1,0 +1,17 @@
+services:
+  pkp-gtfs-analytics:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pkp-gtfs-analytics
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    volumes:
+      - gtfs_cache:/app/.cache
+    restart: unless-stopped
+
+volumes:
+  gtfs_cache:

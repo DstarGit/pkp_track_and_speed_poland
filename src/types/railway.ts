@@ -1,8 +1,10 @@
 export type SortCriterion = 'distance' | 'duration';
 
-export type MainTab = 'longest' | 'longestSegments' | 'speeds';
+export type MainTab = 'longest' | 'longestSegments' | 'speeds' | 'slowest' | 'stations';
 
 export type SpeedViewMode = 'segments' | 'fullRoutes';
+
+export type StationSortMode = 'volume' | 'alphabetical';
 
 export type CategoryGroup =
   | 'EIP'
@@ -147,11 +149,80 @@ export interface LongestSegmentsResponse {
   carriers: CarrierSummary[];
 }
 
+export interface StationDailySummary {
+  stationId: string;
+  numericId: number;
+  name: string;
+  lat: number | null;
+  lon: number | null;
+  country: string | null;
+  isDomestic: boolean;
+  totalTrains: number;
+  startingCount: number;
+  terminatingCount: number;
+  passThroughCount: number;
+  peakHour: number;
+  peakHourCount: number;
+  hourlyCounts: number[];
+  carriers: string[];
+  carrierCounts: Record<string, number>;
+}
+
+export interface StationsTrafficResponse {
+  date: string;
+  fetchedAt: string;
+  fromCache: boolean;
+  sourceName: string;
+  feedDateRange: { from: string; to: string } | null;
+  totalActiveStations: number;
+  totalAnalyzedRoutes: number;
+  stations: StationDailySummary[];
+  carriers: CarrierSummary[];
+}
+
+export interface StationStopEvent {
+  id: string;
+  tripId: string;
+  trainNumber: string;
+  trainName: string | null;
+  carrierCode: string;
+  carrierName: string;
+  categorySymbol: string;
+  categoryGroup: CategoryGroup;
+  originName: string;
+  destinationName: string;
+  arrivalTime: string | null;
+  departureTime: string | null;
+  eventTime: string;
+  hour: number;
+  dwellMinutes: number | null;
+  platform: string | null;
+  track: string | null;
+  stopRole: 'origin' | 'destination' | 'through';
+  isDomesticTrip: boolean;
+}
+
+export interface StationScheduleResponse {
+  date: string;
+  stationId: string;
+  stationName: string;
+  country: string | null;
+  lat: number | null;
+  lon: number | null;
+  totalTrains: number;
+  startingCount: number;
+  terminatingCount: number;
+  passThroughCount: number;
+  hourlyCounts: number[];
+  events: StationStopEvent[];
+}
+
 export type GtfsApiErrorCode =
   | 'OUT_OF_RANGE'
   | 'FEED_DOWNLOAD_ERROR'
   | 'PARSE_ERROR'
-  | 'TRIP_NOT_FOUND';
+  | 'TRIP_NOT_FOUND'
+  | 'STATION_NOT_FOUND';
 
 export interface ApiErrorPayload {
   code: GtfsApiErrorCode;

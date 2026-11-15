@@ -6,6 +6,9 @@ import {
   fetchFastestSegments,
   fetchLongestConnections,
   fetchLongestSegments,
+  fetchSlowestSegments,
+  fetchStationSchedule,
+  fetchStationsTraffic,
   fetchTripDetails,
   GtfsServiceError,
 } from './src/server/gtfsService.ts';
@@ -82,6 +85,73 @@ async function startServer() {
       res.status(500).json({
         code: 'FEED_DOWNLOAD_ERROR',
         message: 'Wystąpił nieoczekiwany błąd serwera podczas wyszukiwania najdłuższych odcinków GTFS.',
+        details: err instanceof Error ? err.message : undefined,
+      });
+    }
+  });
+
+  app.get('/api/slowest-segments', async (req, res) => {
+    const dateParam = typeof req.query.date === 'string' ? req.query.date : undefined;
+    const forceRefresh = req.query.refresh === 'true';
+
+    try {
+      const payload = await fetchSlowestSegments(dateParam, forceRefresh);
+      res.json(payload);
+    } catch (err) {
+      if (err instanceof GtfsServiceError) {
+        res.status(err.statusCode).json(err.payload);
+        return;
+      }
+      res.status(500).json({
+        code: 'FEED_DOWNLOAD_ERROR',
+        message: 'Wystąpił nieoczekiwany błąd serwera podczas wyszukiwania najwolniejszych połączeń GTFS.',
+        details: err instanceof Error ? err.message : undefined,
+      });
+    }
+  });
+
+  app.get('/api/stations-traffic', async (req, res) => {
+    const dateParam = typeof req.query.date === 'string' ? req.query.date : undefined;
+    const forceRefresh = req.query.refresh === 'true';
+
+    try {
+      const payload = await fetchStationsTraffic(dateParam, forceRefresh);
+      res.json(payload);
+    } catch (err) {
+      if (err instanceof GtfsServiceError) {
+        res.status(err.statusCode).json(err.payload);
+        return;
+      }
+      res.status(500).json({
+        code: 'FEED_DOWNLOAD_ERROR',
+        message: 'Wystąpił nieoczekiwany błąd serwera podczas agregacji ruchu na stacjach GTFS.',
+        details: err instanceof Error ? err.message : undefined,
+      });
+    }
+  });
+
+  app.get('/api/station-schedule', async (req, res) => {
+    const stationId = typeof req.query.stationId === 'string' ? req.query.stationId : '';
+    const dateParam = typeof req.query.date === 'string' ? req.query.date : undefined;
+    if (!stationId) {
+      res.status(400).json({
+        code: 'STATION_NOT_FOUND',
+        message: 'Brak parametru stationId.',
+      });
+      return;
+    }
+
+    try {
+      const payload = await fetchStationSchedule(stationId, dateParam);
+      res.json(payload);
+    } catch (err) {
+      if (err instanceof GtfsServiceError) {
+        res.status(err.statusCode).json(err.payload);
+        return;
+      }
+      res.status(500).json({
+        code: 'PARSE_ERROR',
+        message: 'Nie udało się pobrać rozkładu godzinowego dla wybranej stacji.',
         details: err instanceof Error ? err.message : undefined,
       });
     }

@@ -3,6 +3,8 @@ import { AlertTriangle, Calendar, RefreshCw, Search } from 'lucide-react';
 import { ConnectionsTable } from './components/ConnectionsTable';
 import { PolandMap, type HighlightedMapSegment } from './components/PolandMap';
 import { SpeedTable, type SpeedSegmentWithFrequency } from './components/SpeedTable';
+import { StationSchedulePanel } from './components/StationSchedulePanel';
+import { StationsTable } from './components/StationsTable';
 import { StationTimeline } from './components/StationTimeline';
 import type {
   ApiErrorPayload,
@@ -15,6 +17,9 @@ import type {
   SpeedSegmentRecord,
   SpeedViewMode,
   SpeedsResponse,
+  StationScheduleResponse,
+  StationSortMode,
+  StationsTrafficResponse,
 } from './types/railway';
 import {
   CATEGORY_GROUP_LABELS,
@@ -77,6 +82,25 @@ export default function App() {
   const [selectedSpeedFullRouteId, setSelectedSpeedFullRouteId] = useState<string | null>(null);
   const [isLoadingSpeeds, setIsLoadingSpeeds] = useState<boolean>(false);
   const [speedsError, setSpeedsError] = useState<ApiErrorPayload | null>(null);
+
+  // Slowest tab state
+  const [slowestData, setSlowestData] = useState<SpeedsResponse | null>(null);
+  const [selectedSlowestSegmentId, setSelectedSlowestSegmentId] = useState<string | null>(null);
+  const [selectedSlowestFullRouteId, setSelectedSlowestFullRouteId] = useState<string | null>(null);
+  const [isLoadingSlowest, setIsLoadingSlowest] = useState<boolean>(false);
+  const [slowestError, setSlowestError] = useState<ApiErrorPayload | null>(null);
+
+  // Stations traffic & hourly schedule tab state
+  const [stationSortMode, setStationSortMode] = useState<StationSortMode>('volume');
+  const [stationsData, setStationsData] = useState<StationsTrafficResponse | null>(null);
+  const [selectedStationId, setSelectedStationId] = useState<string | null>(null);
+  const [isLoadingStations, setIsLoadingStations] = useState<boolean>(false);
+  const [stationsError, setStationsError] = useState<ApiErrorPayload | null>(null);
+  const stationScheduleCacheRef = useRef<Map<string, StationScheduleResponse>>(new Map());
+  const latestStationRequestRef = useRef<string | null>(null);
+  const [stationSchedule, setStationSchedule] = useState<StationScheduleResponse | null>(null);
+  const [isLoadingStationSchedule, setIsLoadingStationSchedule] = useState<boolean>(false);
+  const [stationScheduleError, setStationScheduleError] = useState<string | null>(null);
 
   // On-demand trip details cache for clicked segments
   const tripDetailsCacheRef = useRef<Map<string, LongestConnection>>(new Map());
@@ -143,6 +167,33 @@ export default function App() {
     }
   }, []);
 
+  const loadSlowest = useCallback(async (date: string, refresh = false) => {
+    setIsLoadingSlowest(true);
+    setSlowestError(null);
+    try {
+      const params = new URLSearchParams({ date });
+      if (refresh) params.set('refresh', 'true');
+      const res = await fetch(`/api/slowest-segments?${params.toString()}`);
+      const json = await res.json();
+      if (!res.ok) {
+        setSlowestError(json as ApiErrorPayload);
+        setSlowestData(null);
+        return;
+      }
+      const payload = json as SpeedsResponse;
+      setSlowestData(payload);
+    } catch (err) {
+      setSlowestError({
+        code: 'FEED_DOWNLOAD_ERROR',
+        message: 'Nie udało się pobrać zestawienia najwolniejszych połączeń z serwera.',
+        details: err instanceof Error ? err.message : undefined,
+      });
+      setSlowestData(null);
+    } finally {
+      setIsLoadingSlowest(false);
+    }
+  }, []);
+
   const loadLongestSegments = useCallback(async (date: string, refresh = false) => {
     setIsLoadingLongestSegments(true);
     setLongestSegmentsError(null);
@@ -167,6 +218,75 @@ export default function App() {
       setLongestSegmentsData(null);
     } finally {
       setIsLoadingLongestSegments(false);
+    }
+  }, []);
+
+  const loadStations = useCallback(async (date: string, refresh = false) => {
+    setIsLoadingStations(true);
+    setStationsError(null);
+    try {
+      const params = new URLSearchParams({ date });
+      if (refresh) params.set('refresh', 'true');
+      const res = await fetch(`/api/stations-traffic?${params.toString()}`);
+      const json = await res.json();
+      if (!res.ok) {
+        setStationsError(json as ApiErrorPayload);
+        setStationsData(null);
+        return;
+      }
+      const payload = json as StationsTrafficResponse;
+      setStationsData(payload);
+    } catch (err) {
+      setStationsError({
+        code: 'FEED_DOWNLOAD_ERROR',
+        message: 'Nie udało się pobrać zestawienia ruchu na stacjach z serwera.',
+        details: err instanceof Error ? err.message : undefined,
+      });
+      setStationsData(null);
+    } finally {
+      setIsLoadingStations(false);
+    }
+  }, []);
+
+  const loadStationSchedule = useCallback(async (stationId: string, date: string) => {
+    const cacheKey = `${date}::${stationId}`;
+    const cached = stationScheduleCacheRef.current.get(cacheKey);
+    if (cached) {
+      latestStationRequestRef.current = cacheKey;
+      setStationSchedule(cached);
+      setStationScheduleError(null);
+      setIsLoadingStationSchedule(false);
+      return;
+    }
+
+    latestStationRequestRef.current = cacheKey;
+    setIsLoadingStationSchedule(true);
+    setStationScheduleError(null);
+    try {
+      const params = new URLSearchParams({ date, stationId });
+      const res = await fetch(`/api/station-schedule?${params.toString()}`);
+      const json = await res.json();
+      if (!res.ok) {
+        if (latestStationRequestRef.current === cacheKey) {
+          setStationScheduleError((json as ApiErrorPayload).message || 'Błąd pobierania rozkładu stacji.');
+          setStationSchedule(null);
+        }
+        return;
+      }
+      const schedulePayload = json as StationScheduleResponse;
+      stationScheduleCacheRef.current.set(cacheKey, schedulePayload);
+      if (latestStationRequestRef.current === cacheKey) {
+        setStationSchedule(schedulePayload);
+      }
+    } catch {
+      if (latestStationRequestRef.current === cacheKey) {
+        setStationScheduleError('Nie udało się pobrać godzinowego rozkładu stacji.');
+        setStationSchedule(null);
+      }
+    } finally {
+      if (latestStationRequestRef.current === cacheKey) {
+        setIsLoadingStationSchedule(false);
+      }
     }
   }, []);
 
@@ -214,6 +334,14 @@ export default function App() {
       if (!longestSegmentsData || longestSegmentsData.date !== selectedDate) {
         void loadLongestSegments(selectedDate, false);
       }
+    } else if (mainTab === 'slowest') {
+      if (!slowestData || slowestData.date !== selectedDate) {
+        void loadSlowest(selectedDate, false);
+      }
+    } else if (mainTab === 'stations') {
+      if (!stationsData || stationsData.date !== selectedDate) {
+        void loadStations(selectedDate, false);
+      }
     } else {
       if (!speedsData || speedsData.date !== selectedDate) {
         void loadSpeeds(selectedDate, false);
@@ -225,9 +353,13 @@ export default function App() {
     data,
     longestSegmentsData,
     speedsData,
+    slowestData,
+    stationsData,
     loadConnections,
     loadLongestSegments,
     loadSpeeds,
+    loadSlowest,
+    loadStations,
   ]);
 
   const handleDateChange = (nextDate: string) => {
@@ -235,22 +367,45 @@ export default function App() {
     setSelectedDate(nextDate);
     setHoveredStationId(null);
     setActiveTripDetails(null);
+    setStationSchedule(null);
   };
 
   const handleRefreshActive = () => {
     if (mainTab === 'longest') {
       setSpeedsData(null);
+      setSlowestData(null);
       setLongestSegmentsData(null);
+      setStationsData(null);
       void loadConnections(selectedDate, true);
     } else if (mainTab === 'longestSegments') {
       setData(null);
       setSpeedsData(null);
+      setSlowestData(null);
+      setStationsData(null);
       tripDetailsCacheRef.current.clear();
       setActiveTripDetails(null);
       void loadLongestSegments(selectedDate, true);
+    } else if (mainTab === 'slowest') {
+      setData(null);
+      setSpeedsData(null);
+      setLongestSegmentsData(null);
+      setStationsData(null);
+      tripDetailsCacheRef.current.clear();
+      setActiveTripDetails(null);
+      void loadSlowest(selectedDate, true);
+    } else if (mainTab === 'stations') {
+      setData(null);
+      setSpeedsData(null);
+      setSlowestData(null);
+      setLongestSegmentsData(null);
+      stationScheduleCacheRef.current.clear();
+      setStationSchedule(null);
+      void loadStations(selectedDate, true);
     } else {
       setData(null);
+      setSlowestData(null);
       setLongestSegmentsData(null);
+      setStationsData(null);
       tripDetailsCacheRef.current.clear();
       setActiveTripDetails(null);
       void loadSpeeds(selectedDate, true);
@@ -445,6 +600,156 @@ export default function App() {
     uniqueSegmentsOnly,
   ]);
 
+  // Filtered & sorted Slowest Segments (Odcinki A -> B wg najniższej prędkości)
+  const filteredSlowestSegments: SpeedSegmentWithFrequency[] = useMemo(() => {
+    if (!slowestData) return [];
+    const q = searchQuery.trim().toLowerCase();
+
+    const filtered = slowestData.segments.filter((seg) => {
+      if (seg.distanceKm < minDistanceKm) return false;
+      if (scopeFilter === 'domestic' && !seg.isDomestic) return false;
+      if (scopeFilter === 'international' && seg.isDomestic) return false;
+      if (selectedCarrier !== 'ALL' && seg.carrierCode !== selectedCarrier) return false;
+      if (selectedCategoryGroup !== 'ALL' && seg.categoryGroup !== selectedCategoryGroup) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        seg.fromStationName.toLowerCase().includes(q) ||
+        seg.toStationName.toLowerCase().includes(q) ||
+        seg.routeOriginName.toLowerCase().includes(q) ||
+        seg.routeDestinationName.toLowerCase().includes(q) ||
+        seg.trainNumber.toLowerCase().includes(q) ||
+        (seg.trainName && seg.trainName.toLowerCase().includes(q))
+      );
+    });
+
+    const sorted = [...filtered].sort(
+      (a, b) => a.avgSpeedKmh - b.avgSpeedKmh || b.distanceKm - a.distanceKm,
+    );
+
+    if (!uniqueSegmentsOnly) {
+      return sorted.slice(0, 120);
+    }
+
+    const pairMap = new Map<string, { record: SpeedSegmentRecord; count: number }>();
+    for (const seg of sorted) {
+      const pairKey = `${seg.fromStationId}-${seg.toStationId}`;
+      const existing = pairMap.get(pairKey);
+      if (!existing) {
+        pairMap.set(pairKey, { record: seg, count: 1 });
+      } else {
+        existing.count += 1;
+      }
+    }
+
+    return Array.from(pairMap.values())
+      .slice(0, 120)
+      .map((entry) => ({
+        ...entry.record,
+        frequencyCount: entry.count,
+      }));
+  }, [
+    slowestData,
+    minDistanceKm,
+    scopeFilter,
+    selectedCarrier,
+    selectedCategoryGroup,
+    searchQuery,
+    uniqueSegmentsOnly,
+  ]);
+
+  // Filtered & sorted Slowest Full Routes (Całe trasy wg najniższej prędkości)
+  const filteredSlowestFullRoutes = useMemo(() => {
+    if (!slowestData) return [];
+    const q = searchQuery.trim().toLowerCase();
+
+    const filtered = slowestData.fullRoutes.filter((conn) => {
+      if (conn.distanceKm < minDistanceKm) return false;
+      if (scopeFilter === 'domestic' && !conn.isDomestic) return false;
+      if (scopeFilter === 'international' && conn.isDomestic) return false;
+      if (selectedCarrier !== 'ALL' && conn.carrierCode !== selectedCarrier) return false;
+      if (selectedCategoryGroup !== 'ALL' && conn.categoryGroup !== selectedCategoryGroup) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        conn.originName.toLowerCase().includes(q) ||
+        conn.destinationName.toLowerCase().includes(q) ||
+        conn.trainNumber.toLowerCase().includes(q) ||
+        (conn.trainName && conn.trainName.toLowerCase().includes(q)) ||
+        conn.stops.some((s) => s.name.toLowerCase().includes(q))
+      );
+    });
+
+    return [...filtered]
+      .sort((a, b) => a.avgSpeedKmh - b.avgSpeedKmh || b.distanceKm - a.distanceKm)
+      .slice(0, 120);
+  }, [
+    slowestData,
+    minDistanceKm,
+    scopeFilter,
+    selectedCarrier,
+    selectedCategoryGroup,
+    searchQuery,
+  ]);
+
+  // Filtered & sorted Stations Traffic
+  const scopedStations = useMemo(() => {
+    if (!stationsData) return [];
+    return stationsData.stations.filter((station) => {
+      if (scopeFilter === 'domestic' && !station.isDomestic) return false;
+      if (scopeFilter === 'international' && station.isDomestic) return false;
+      if (selectedCarrier !== 'ALL' && !station.carriers.includes(selectedCarrier)) {
+        return false;
+      }
+      return true;
+    });
+  }, [stationsData, scopeFilter, selectedCarrier]);
+
+  const alphabeticalStationsForPicker = useMemo(() => {
+    return [...scopedStations].sort((a, b) => a.name.localeCompare(b.name, 'pl'));
+  }, [scopedStations]);
+
+  const filteredStations = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const matched = q
+      ? scopedStations.filter((s) => s.name.toLowerCase().includes(q))
+      : scopedStations;
+
+    if (stationSortMode === 'alphabetical') {
+      return [...matched].sort((a, b) => a.name.localeCompare(b.name, 'pl'));
+    }
+
+    return [...matched].sort((a, b) => {
+      const countA = selectedCarrier === 'ALL' ? a.totalTrains : (a.carrierCounts[selectedCarrier] ?? 0);
+      const countB = selectedCarrier === 'ALL' ? b.totalTrains : (b.carrierCounts[selectedCarrier] ?? 0);
+      return countB - countA || a.name.localeCompare(b.name, 'pl');
+    });
+  }, [scopedStations, searchQuery, stationSortMode, selectedCarrier]);
+
+  const selectedStation = useMemo(() => {
+    if (selectedStationId && stationsData) {
+      const explicitMatch =
+        filteredStations.find((s) => s.stationId === selectedStationId) ??
+        stationsData.stations.find((s) => s.stationId === selectedStationId);
+      if (explicitMatch) return explicitMatch;
+    }
+    return filteredStations[0] ?? null;
+  }, [filteredStations, selectedStationId, stationsData]);
+
+  useEffect(() => {
+    if (mainTab !== 'stations') return;
+    if (!selectedStation) {
+      setStationSchedule(null);
+      return;
+    }
+    if (selectedStationId !== selectedStation.stationId) {
+      setSelectedStationId(selectedStation.stationId);
+    }
+    void loadStationSchedule(selectedStation.stationId, selectedDate);
+  }, [mainTab, selectedStation, selectedStationId, selectedDate, loadStationSchedule]);
+
   const selectedLongestSegment = useMemo(() => {
     if (filteredLongestSegments.length === 0) return null;
     return (
@@ -469,7 +774,23 @@ export default function App() {
     );
   }, [filteredSpeedFullRoutes, selectedSpeedFullRouteId]);
 
-  // Auto-sync trip details when in Speeds -> Segments mode or LongestSegments tab
+  const selectedSlowestSegment = useMemo(() => {
+    if (filteredSlowestSegments.length === 0) return null;
+    return (
+      filteredSlowestSegments.find((s) => s.id === selectedSlowestSegmentId) ??
+      filteredSlowestSegments[0]
+    );
+  }, [filteredSlowestSegments, selectedSlowestSegmentId]);
+
+  const selectedSlowestFullRoute = useMemo(() => {
+    if (filteredSlowestFullRoutes.length === 0) return null;
+    return (
+      filteredSlowestFullRoutes.find((c) => c.id === selectedSlowestFullRouteId) ??
+      filteredSlowestFullRoutes[0]
+    );
+  }, [filteredSlowestFullRoutes, selectedSlowestFullRouteId]);
+
+  // Auto-sync trip details when in Speeds/Slowest -> Segments mode or LongestSegments tab
   useEffect(() => {
     if (mainTab === 'speeds' && speedMode === 'segments') {
       if (!selectedSpeedSegment) {
@@ -480,6 +801,15 @@ export default function App() {
         setSelectedSpeedSegmentId(selectedSpeedSegment.id);
       }
       void loadTripDetailsForSegment(selectedSpeedSegment.tripId);
+    } else if (mainTab === 'slowest' && speedMode === 'segments') {
+      if (!selectedSlowestSegment) {
+        setActiveTripDetails(null);
+        return;
+      }
+      if (selectedSlowestSegmentId !== selectedSlowestSegment.id) {
+        setSelectedSlowestSegmentId(selectedSlowestSegment.id);
+      }
+      void loadTripDetailsForSegment(selectedSlowestSegment.tripId);
     } else if (mainTab === 'longestSegments') {
       if (!selectedLongestSegment) {
         setActiveTripDetails(null);
@@ -495,6 +825,8 @@ export default function App() {
     speedMode,
     selectedSpeedSegment,
     selectedSpeedSegmentId,
+    selectedSlowestSegment,
+    selectedSlowestSegmentId,
     selectedLongestSegment,
     selectedLongestSegmentId,
     loadTripDetailsForSegment,
@@ -508,6 +840,15 @@ export default function App() {
       setSelectedSpeedFullRouteId(filteredSpeedFullRoutes[0].id);
     }
   }, [mainTab, speedMode, filteredSpeedFullRoutes, selectedSpeedFullRouteId]);
+
+  useEffect(() => {
+    if (mainTab !== 'slowest' || speedMode !== 'fullRoutes') return;
+    if (filteredSlowestFullRoutes.length === 0) return;
+    const stillVisible = filteredSlowestFullRoutes.some((c) => c.id === selectedSlowestFullRouteId);
+    if (!stillVisible) {
+      setSelectedSlowestFullRouteId(filteredSlowestFullRoutes[0].id);
+    }
+  }, [mainTab, speedMode, filteredSlowestFullRoutes, selectedSlowestFullRouteId]);
 
   const selectedConnection: LongestConnection | null = useMemo(() => {
     if (!selectedId) return filteredAndSorted[0] ?? null;
@@ -531,6 +872,17 @@ export default function App() {
       }
       return null;
     }
+    if (mainTab === 'slowest') {
+      if (speedMode === 'fullRoutes') return selectedSlowestFullRoute;
+      if (
+        activeTripDetails &&
+        selectedSlowestSegment &&
+        activeTripDetails.id === selectedSlowestSegment.tripId
+      ) {
+        return activeTripDetails;
+      }
+      return null;
+    }
     if (speedMode === 'fullRoutes') return selectedSpeedFullRoute;
     if (activeTripDetails && selectedSpeedSegment && activeTripDetails.id === selectedSpeedSegment.tripId) {
       return activeTripDetails;
@@ -541,8 +893,10 @@ export default function App() {
     speedMode,
     selectedConnection,
     selectedSpeedFullRoute,
+    selectedSlowestFullRoute,
     activeTripDetails,
     selectedSpeedSegment,
+    selectedSlowestSegment,
     selectedLongestSegment,
   ]);
 
@@ -559,6 +913,18 @@ export default function App() {
         toLon: selectedLongestSegment.toLon,
       };
     }
+    if (mainTab === 'slowest' && speedMode === 'segments' && selectedSlowestSegment) {
+      return {
+        fromStationId: selectedSlowestSegment.fromStationId,
+        toStationId: selectedSlowestSegment.toStationId,
+        fromName: selectedSlowestSegment.fromStationName,
+        toName: selectedSlowestSegment.toStationName,
+        fromLat: selectedSlowestSegment.fromLat,
+        fromLon: selectedSlowestSegment.fromLon,
+        toLat: selectedSlowestSegment.toLat,
+        toLon: selectedSlowestSegment.toLon,
+      };
+    }
     if (mainTab !== 'speeds' || speedMode !== 'segments' || !selectedSpeedSegment) {
       return null;
     }
@@ -572,7 +938,7 @@ export default function App() {
       toLat: selectedSpeedSegment.toLat,
       toLon: selectedSpeedSegment.toLon,
     };
-  }, [mainTab, speedMode, selectedSpeedSegment, selectedLongestSegment]);
+  }, [mainTab, speedMode, selectedSpeedSegment, selectedSlowestSegment, selectedLongestSegment]);
 
   // KPI metrics for Longest tab
   const topDistanceRecord = useMemo(() => {
@@ -595,36 +961,65 @@ export default function App() {
     return filteredSpeedFullRoutes[0] ?? null;
   }, [speedMode, filteredSpeedSegments, filteredSpeedFullRoutes]);
 
+  // KPI metrics for Slowest tab
+  const topSlowestRecord = useMemo(() => {
+    if (speedMode === 'segments') {
+      return filteredSlowestSegments[0] ?? null;
+    }
+    return filteredSlowestFullRoutes[0] ?? null;
+  }, [speedMode, filteredSlowestSegments, filteredSlowestFullRoutes]);
+
   const topLongestSegmentRecord = filteredLongestSegments[0] ?? null;
+
+  const busiestStationRecord = useMemo(() => {
+    if (filteredStations.length === 0) return null;
+    return [...filteredStations].sort((a, b) => {
+      const countA = selectedCarrier === 'ALL' ? a.totalTrains : (a.carrierCounts[selectedCarrier] ?? 0);
+      const countB = selectedCarrier === 'ALL' ? b.totalTrains : (b.carrierCounts[selectedCarrier] ?? 0);
+      return countB - countA;
+    })[0];
+  }, [filteredStations, selectedCarrier]);
 
   const activeError =
     mainTab === 'longest'
       ? longestError
       : mainTab === 'longestSegments'
         ? longestSegmentsError
-        : speedsError;
+        : mainTab === 'slowest'
+          ? slowestError
+          : mainTab === 'stations'
+            ? stationsError
+            : speedsError;
   const activeLoading =
     mainTab === 'longest'
       ? isLoadingLongest
       : mainTab === 'longestSegments'
         ? isLoadingLongestSegments
-        : isLoadingSpeeds;
+        : mainTab === 'slowest'
+          ? isLoadingSlowest
+          : mainTab === 'stations'
+            ? isLoadingStations
+            : isLoadingSpeeds;
   const activeCarriers =
     mainTab === 'longest'
       ? data?.carriers ?? []
       : mainTab === 'longestSegments'
         ? longestSegmentsData?.carriers ?? []
-        : speedsData?.carriers ?? [];
+        : mainTab === 'slowest'
+          ? slowestData?.carriers ?? []
+          : mainTab === 'stations'
+            ? stationsData?.carriers ?? []
+            : speedsData?.carriers ?? [];
 
   const handleResetFilters = () => {
     setScopeFilter('all');
     setSelectedCarrier('ALL');
     setSearchQuery('');
-    if (mainTab === 'speeds' || mainTab === 'longestSegments') {
+    if (mainTab === 'speeds' || mainTab === 'slowest' || mainTab === 'longestSegments') {
       setSelectedCategoryGroup('ALL');
       setUniqueSegmentsOnly(false);
     }
-    if (mainTab === 'speeds') {
+    if (mainTab === 'speeds' || mainTab === 'slowest') {
       setMinDistanceKm(10);
     }
   };
@@ -645,7 +1040,7 @@ export default function App() {
             PKP · Analiza Rozkładów GTFS
           </a>
 
-          <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-400">
+          <nav className="hidden md:flex items-center gap-5 text-sm font-medium text-slate-400">
             <button
               type="button"
               onClick={() => {
@@ -682,14 +1077,32 @@ export default function App() {
                 mainTab === 'speeds' ? 'text-cyan-400 font-semibold' : 'hover:text-cyan-400'
               }`}
             >
-              Średnie prędkości
+              Najszybsze
             </button>
-            <a
-              href="#mapa-trasy"
-              className="hover:text-amber-400 transition-colors whitespace-nowrap shrink-0"
+            <button
+              type="button"
+              onClick={() => {
+                setMainTab('slowest');
+                setHoveredStationId(null);
+              }}
+              className={`transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                mainTab === 'slowest' ? 'text-rose-400 font-semibold' : 'hover:text-rose-400'
+              }`}
             >
-              Mapa i oś
-            </a>
+              Najwolniejsze
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMainTab('stations');
+                setHoveredStationId(null);
+              }}
+              className={`transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                mainTab === 'stations' ? 'text-emerald-400 font-semibold' : 'hover:text-emerald-400'
+              }`}
+            >
+              Stacje (doba)
+            </button>
             <a
               href="#metodologia"
               className="hover:text-amber-400 transition-colors whitespace-nowrap shrink-0"
@@ -756,7 +1169,35 @@ export default function App() {
                       : 'text-slate-300 hover:text-white'
                   }`}
                 >
-                  Średnie prędkości (km/h)
+                  Najszybsze (km/h)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMainTab('slowest');
+                    setHoveredStationId(null);
+                  }}
+                  className={`px-3.5 py-1.5 text-xs font-semibold rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    mainTab === 'slowest'
+                      ? 'bg-rose-400 text-slate-950'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  Najwolniejsze (km/h)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMainTab('stations');
+                    setHoveredStationId(null);
+                  }}
+                  className={`px-3.5 py-1.5 text-xs font-semibold rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    mainTab === 'stations'
+                      ? 'bg-emerald-400 text-slate-950'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  Stacje (ruch dobowy)
                 </button>
               </div>
 
@@ -765,14 +1206,22 @@ export default function App() {
                   ? 'Zestawienie najdłuższych połączeń kolejowych w Polsce'
                   : mainTab === 'longestSegments'
                     ? 'Najdłuższe odcinki bez postoju między stacjami (km)'
-                    : 'Najszybsze odcinki i trasy kolejowe w Polsce (km/h)'}
+                    : mainTab === 'slowest'
+                      ? 'Najwolniejsze odcinki i trasy kolejowe w Polsce (km/h)'
+                      : mainTab === 'stations'
+                        ? 'Ruch pociągów na stacjach kolejowych w ciągu doby'
+                        : 'Najszybsze odcinki i trasy kolejowe w Polsce (km/h)'}
               </h1>
               <p className="text-sm text-slate-400">
                 {mainTab === 'longest'
                   ? 'Dane rozkładowe ze zbioru Polish Trains GTFS · dystans po śladzie torowym oraz współrzędne stacji WGS84'
                   : mainTab === 'longestSegments'
                     ? 'Zestawienie najdłuższych nieprzerwanych przelotów między kolejnymi postojami handlowymi dla wszystkich kategorii pociągów'
-                    : 'Prędkość handlowa wyliczana z dokładnością do sekund na bazie rzeczywistej długości torowej odcinków z GTFS'}
+                    : mainTab === 'slowest'
+                      ? 'Zestawienie najniższych prędkości handlowych odcinków A → B i całych tras z dokładnością do sekund rozkładowych GTFS'
+                      : mainTab === 'stations'
+                        ? 'Ranking stacji według liczby obsługiwanych pociągów, lista alfabetyczna A–Z oraz rozkład pociągów w każdej godzinie doby (00:00–23:59)'
+                        : 'Prędkość handlowa wyliczana z dokładnością do sekund na bazie rzeczywistej długości torowej odcinków z GTFS'}
               </p>
             </div>
 
@@ -802,6 +1251,26 @@ export default function App() {
                 {speedsData.fromCache ? 'pamięć podręczna' : 'świeży odczyt GTFS'}
                 {speedsData.feedDateRange
                   ? ` · zakres ${speedsData.feedDateRange.from} – ${speedsData.feedDateRange.to}`
+                  : ''}
+              </div>
+            )}
+
+            {mainTab === 'slowest' && slowestData && (
+              <div className="text-xs text-slate-400 font-mono tabular-nums shrink-0">
+                Przetworzono {formatFetchedTime(slowestData.fetchedAt)} ·{' '}
+                {slowestData.fromCache ? 'pamięć podręczna' : 'świeży odczyt GTFS'}
+                {slowestData.feedDateRange
+                  ? ` · zakres ${slowestData.feedDateRange.from} – ${slowestData.feedDateRange.to}`
+                  : ''}
+              </div>
+            )}
+
+            {mainTab === 'stations' && stationsData && (
+              <div className="text-xs text-slate-400 font-mono tabular-nums shrink-0">
+                Przetworzono {formatFetchedTime(stationsData.fetchedAt)} ·{' '}
+                {stationsData.fromCache ? 'pamięć podręczna' : 'świeży odczyt GTFS'}
+                {stationsData.feedDateRange
+                  ? ` · zakres ${stationsData.feedDateRange.from} – ${stationsData.feedDateRange.to}`
                   : ''}
               </div>
             )}
@@ -922,6 +1391,140 @@ export default function App() {
                 </div>
               </div>
             </div>
+          ) : mainTab === 'slowest' ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 border border-white/[0.08] bg-[#111827] rounded-lg divide-y sm:divide-y-0 sm:divide-x divide-white/[0.08]">
+              <div className="p-4">
+                <div className="text-xs text-slate-400">
+                  {speedMode === 'segments'
+                    ? 'Najniższa prędkość (odcinek)'
+                    : 'Najniższa prędkość (cała trasa)'}
+                </div>
+                <div className="mt-1 font-mono tabular-nums text-xl font-bold text-rose-400">
+                  {topSlowestRecord ? formatSpeedKmh(topSlowestRecord.avgSpeedKmh) : '—'}
+                </div>
+                <div className="text-xs text-slate-400 mt-1 truncate">
+                  {topSlowestRecord
+                    ? 'fromStationName' in topSlowestRecord
+                      ? `${topSlowestRecord.fromStationName} → ${topSlowestRecord.toStationName}`
+                      : `${topSlowestRecord.originName} → ${topSlowestRecord.destinationName}`
+                    : 'Brak danych dla wybranych filtrów'}
+                </div>
+              </div>
+
+              <div className="p-4">
+                <div className="text-xs text-slate-400">Dystans i czas rekordu</div>
+                <div className="mt-1 font-mono tabular-nums text-xl font-bold text-slate-100">
+                  {topSlowestRecord
+                    ? `${formatDistanceKm(topSlowestRecord.distanceKm)} · ${formatDurationSeconds(topSlowestRecord.durationSeconds)}`
+                    : '—'}
+                </div>
+                <div className="text-xs text-slate-400 mt-1 truncate">
+                  {topSlowestRecord
+                    ? `${topSlowestRecord.categorySymbol} ${topSlowestRecord.trainNumber} (${topSlowestRecord.carrierCode})`
+                    : `Próg minimalny: ${minDistanceKm} km`}
+                </div>
+              </div>
+
+              <div className="p-4">
+                <div className="text-xs text-slate-400">Przeanalizowane odcinki / kursy</div>
+                <div className="mt-1 font-mono tabular-nums text-xl font-bold text-slate-100">
+                  {slowestData
+                    ? `${slowestData.totalAnalyzedSegments.toLocaleString('pl-PL')} / ${slowestData.totalAnalyzedRoutes.toLocaleString('pl-PL')}`
+                    : '—'}
+                </div>
+                <div className="text-xs text-slate-400 mt-1">
+                  {slowestData
+                    ? `Widoczne: ${
+                        speedMode === 'segments'
+                          ? filteredSlowestSegments.length
+                          : filteredSlowestFullRoutes.length
+                      } pozycji (${CATEGORY_GROUP_OPTIONS.find((o) => o.value === selectedCategoryGroup)?.label ?? ''})`
+                    : 'Wyszukiwanie najwolniejszych relacji'}
+                </div>
+              </div>
+
+              <div className="p-4">
+                <div className="text-xs text-slate-400">
+                  {speedMode === 'segments' ? 'Wybrany odcinek A → B' : 'Wybrany pociąg'}
+                </div>
+                <div className="mt-1 font-mono tabular-nums text-xl font-bold text-slate-100">
+                  {speedMode === 'segments' && selectedSlowestSegment
+                    ? `${formatSpeedKmh(selectedSlowestSegment.avgSpeedKmh)}`
+                    : speedMode === 'fullRoutes' && selectedSlowestFullRoute
+                      ? `${formatSpeedKmh(selectedSlowestFullRoute.avgSpeedKmh)}`
+                      : '—'}
+                </div>
+                <div className="text-xs text-slate-400 mt-1 truncate">
+                  {speedMode === 'segments' && selectedSlowestSegment
+                    ? `${selectedSlowestSegment.fromStationName} → ${selectedSlowestSegment.toStationName} (${selectedSlowestSegment.departureTime}–${selectedSlowestSegment.arrivalTime})`
+                    : speedMode === 'fullRoutes' && selectedSlowestFullRoute
+                      ? `${selectedSlowestFullRoute.originName} → ${selectedSlowestFullRoute.destinationName}`
+                      : 'Wybierz wiersz z tabeli poniżej'}
+                </div>
+              </div>
+            </div>
+          ) : mainTab === 'stations' ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 border border-white/[0.08] bg-[#111827] rounded-lg divide-y sm:divide-y-0 sm:divide-x divide-white/[0.08]">
+              <div className="p-4">
+                <div className="text-xs text-slate-400">Najbardziej obciążona stacja</div>
+                <div className="mt-1 font-mono tabular-nums text-xl font-bold text-emerald-400">
+                  {busiestStationRecord
+                    ? `${(selectedCarrier === 'ALL'
+                        ? busiestStationRecord.totalTrains
+                        : (busiestStationRecord.carrierCounts[selectedCarrier] ?? 0)
+                      ).toLocaleString('pl-PL')} poc.`
+                    : '—'}
+                </div>
+                <div className="text-xs text-slate-400 mt-1 truncate">
+                  {busiestStationRecord
+                    ? `${busiestStationRecord.name} (szczyt ${String(busiestStationRecord.peakHour).padStart(2, '0')}:00)`
+                    : 'Ładowanie rozkładu stacji'}
+                </div>
+              </div>
+
+              <div className="p-4">
+                <div className="text-xs text-slate-400">Czynne stacje i przystanki</div>
+                <div className="mt-1 font-mono tabular-nums text-xl font-bold text-slate-100">
+                  {stationsData ? stationsData.totalActiveStations.toLocaleString('pl-PL') : '—'}
+                </div>
+                <div className="text-xs text-slate-400 mt-1">
+                  {stationsData
+                    ? `Widoczne po filtrach: ${filteredStations.length.toLocaleString('pl-PL')} stacji`
+                    : 'Wszystkie przystanki w rozkładzie'}
+                </div>
+              </div>
+
+              <div className="p-4">
+                <div className="text-xs text-slate-400">Wybrana stacja (ruch dobowy)</div>
+                <div className="mt-1 font-mono tabular-nums text-xl font-bold text-slate-100">
+                  {selectedStation
+                    ? `${(selectedCarrier === 'ALL'
+                        ? selectedStation.totalTrains
+                        : (selectedStation.carrierCounts[selectedCarrier] ?? 0)
+                      ).toLocaleString('pl-PL')} pociągów`
+                    : '—'}
+                </div>
+                <div className="text-xs text-slate-400 mt-1 truncate">
+                  {selectedStation
+                    ? `${selectedStation.name} · szczyt ${String(selectedStation.peakHour).padStart(2, '0')}:00 (${selectedStation.peakHourCount} poc.)`
+                    : 'Wybierz stację z tabeli lub listy A–Z'}
+                </div>
+              </div>
+
+              <div className="p-4">
+                <div className="text-xs text-slate-400">Struktura postojów wybranej stacji</div>
+                <div className="mt-1 font-mono tabular-nums text-xl font-bold text-slate-100">
+                  {selectedStation
+                    ? `${selectedStation.startingCount} / ${selectedStation.passThroughCount} / ${selectedStation.terminatingCount}`
+                    : '—'}
+                </div>
+                <div className="text-xs text-slate-400 mt-1 truncate">
+                  {selectedStation
+                    ? `Początkowe / przelotowe / końcowe (${selectedStation.carriers.length} przewoźników)`
+                    : 'Analiza dobowego ruchu'}
+                </div>
+              </div>
+            </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 border border-white/[0.08] bg-[#111827] rounded-lg divide-y sm:divide-y-0 sm:divide-x divide-white/[0.08]">
               <div className="p-4">
@@ -1027,7 +1630,7 @@ export default function App() {
                     Czas przejazdu
                   </button>
                 </div>
-              ) : mainTab === 'speeds' ? (
+              ) : mainTab === 'speeds' || mainTab === 'slowest' ? (
                 <div className="flex items-center p-1 bg-[#090D16] border border-white/10 rounded">
                   <button
                     type="button"
@@ -1037,7 +1640,9 @@ export default function App() {
                     }}
                     className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                       speedMode === 'segments'
-                        ? 'bg-cyan-400 text-slate-950'
+                        ? mainTab === 'slowest'
+                          ? 'bg-rose-400 text-slate-950'
+                          : 'bg-cyan-400 text-slate-950'
                         : 'text-slate-300 hover:text-white'
                     }`}
                   >
@@ -1051,17 +1656,65 @@ export default function App() {
                     }}
                     className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                       speedMode === 'fullRoutes'
-                        ? 'bg-cyan-400 text-slate-950'
+                        ? mainTab === 'slowest'
+                          ? 'bg-rose-400 text-slate-950'
+                          : 'bg-cyan-400 text-slate-950'
                         : 'text-slate-300 hover:text-white'
                     }`}
                   >
                     Całe trasy
                   </button>
                 </div>
+              ) : mainTab === 'stations' ? (
+                <>
+                  <div className="flex items-center p-1 bg-[#090D16] border border-white/10 rounded">
+                    <button
+                      type="button"
+                      onClick={() => setStationSortMode('volume')}
+                      className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        stationSortMode === 'volume'
+                          ? 'bg-emerald-400 text-slate-950'
+                          : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      Najwięcej pociągów
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setStationSortMode('alphabetical')}
+                      className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        stationSortMode === 'alphabetical'
+                          ? 'bg-emerald-400 text-slate-950'
+                          : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      Lista alfabetyczna (A–Z)
+                    </button>
+                  </div>
+
+                  {alphabeticalStationsForPicker.length > 0 && (
+                    <select
+                      aria-label="Wybierz stację z listy alfabetycznej"
+                      value={selectedStation?.stationId ?? ''}
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          setSelectedStationId(e.target.value);
+                        }
+                      }}
+                      className="px-3 py-2 text-xs rounded bg-[#090D16] border border-white/10 text-slate-100 focus:outline-none focus:border-emerald-400/60 max-w-[270px] cursor-pointer"
+                    >
+                      {alphabeticalStationsForPicker.map((s) => (
+                        <option key={s.stationId} value={s.stationId}>
+                          {s.name} ({s.totalTrains} poc./dobę)
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </>
               ) : null}
 
-              {/* Min distance selector (Speeds tab) */}
-              {mainTab === 'speeds' && (
+              {/* Min distance selector (Speeds & Slowest tabs) */}
+              {(mainTab === 'speeds' || mainTab === 'slowest') && (
                 <div className="flex items-center p-1 bg-[#090D16] border border-white/10 rounded">
                   <span className="px-2 text-[11px] text-slate-500 whitespace-nowrap">
                     Próg:
@@ -1073,7 +1726,9 @@ export default function App() {
                       onClick={() => setMinDistanceKm(opt.value)}
                       className={`px-2 py-1.5 text-xs font-mono tabular-nums rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                         minDistanceKm === opt.value
-                          ? 'bg-slate-800 text-cyan-300 font-semibold'
+                          ? mainTab === 'slowest'
+                            ? 'bg-slate-800 text-rose-300 font-semibold'
+                            : 'bg-slate-800 text-cyan-300 font-semibold'
                           : 'text-slate-400 hover:text-slate-200'
                       }`}
                     >
@@ -1218,7 +1873,7 @@ export default function App() {
               );
             })()}
 
-            {(mainTab === 'speeds' || mainTab === 'longestSegments') && (
+            {(mainTab === 'speeds' || mainTab === 'slowest' || mainTab === 'longestSegments') && (
               <>
                 <div className="flex flex-wrap items-center gap-1 p-1 bg-[#090D16] border border-white/10 rounded">
                   {CATEGORY_GROUP_OPTIONS.map((opt) => (
@@ -1235,7 +1890,9 @@ export default function App() {
                         selectedCategoryGroup === opt.value
                           ? mainTab === 'longestSegments'
                             ? 'bg-slate-800 text-amber-300 font-semibold'
-                            : 'bg-slate-800 text-cyan-300 font-semibold'
+                            : mainTab === 'slowest'
+                              ? 'bg-slate-800 text-rose-300 font-semibold'
+                              : 'bg-slate-800 text-cyan-300 font-semibold'
                           : 'text-slate-400 hover:text-slate-200'
                       }`}
                     >
@@ -1252,7 +1909,9 @@ export default function App() {
                       uniqueSegmentsOnly
                         ? mainTab === 'longestSegments'
                           ? 'bg-amber-500/15 border-amber-400/50 text-amber-300'
-                          : 'bg-cyan-500/15 border-cyan-400/50 text-cyan-300'
+                          : mainTab === 'slowest'
+                            ? 'bg-rose-500/15 border-rose-400/50 text-rose-300'
+                            : 'bg-cyan-500/15 border-cyan-400/50 text-cyan-300'
                         : 'bg-[#090D16] border-white/10 text-slate-300 hover:text-white'
                     }`}
                   >
@@ -1286,8 +1945,40 @@ export default function App() {
           </section>
         )}
 
-        {/* Main Split Workspace: Table + (Map & Station Timeline) */}
-        {!activeError && (
+        {/* Main Split Workspace: Table + (Map & Station Timeline OR Station Hourly Schedule) */}
+        {!activeError && mainTab === 'stations' && (
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 xl:gap-5 items-start">
+            <div className="xl:col-span-5 min-w-0">
+              <StationsTable
+                stations={filteredStations}
+                sortMode={stationSortMode}
+                selectedStationId={selectedStation?.stationId ?? null}
+                selectedCarrier={selectedCarrier}
+                onSelectStation={(st) => setSelectedStationId(st.stationId)}
+                isLoading={isLoadingStations}
+                onResetFilters={handleResetFilters}
+              />
+            </div>
+
+            <div className="xl:col-span-7 xl:sticky xl:top-20 min-w-0">
+              <StationSchedulePanel
+                station={selectedStation}
+                schedule={
+                  stationSchedule &&
+                  selectedStation &&
+                  stationSchedule.stationId === selectedStation.stationId
+                    ? stationSchedule
+                    : null
+                }
+                selectedCarrier={selectedCarrier}
+                isLoading={isLoadingStationSchedule}
+                error={stationScheduleError}
+              />
+            </div>
+          </div>
+        )}
+
+        {!activeError && mainTab !== 'stations' && (
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 xl:gap-5 items-start">
             <div className="xl:col-span-8 min-w-0">
               {mainTab === 'longest' ? (
@@ -1319,6 +2010,28 @@ export default function App() {
                   isLoading={isLoadingLongestSegments}
                   uniqueOnly={uniqueSegmentsOnly}
                   minDistanceKm={0}
+                  onResetFilters={handleResetFilters}
+                />
+              ) : mainTab === 'slowest' ? (
+                <SpeedTable
+                  mode={speedMode}
+                  sortCriterion="slowest"
+                  segments={filteredSlowestSegments}
+                  fullRoutes={filteredSlowestFullRoutes}
+                  selectedSegmentId={selectedSlowestSegment?.id ?? null}
+                  selectedFullRouteId={selectedSlowestFullRoute?.id ?? null}
+                  onSelectSegment={(seg) => {
+                    setSelectedSlowestSegmentId(seg.id);
+                    setHoveredStationId(null);
+                    void loadTripDetailsForSegment(seg.tripId);
+                  }}
+                  onSelectFullRoute={(conn) => {
+                    setSelectedSlowestFullRouteId(conn.id);
+                    setHoveredStationId(null);
+                  }}
+                  isLoading={isLoadingSlowest}
+                  uniqueOnly={uniqueSegmentsOnly}
+                  minDistanceKm={minDistanceKm}
                   onResetFilters={handleResetFilters}
                 />
               ) : (
@@ -1353,7 +2066,8 @@ export default function App() {
                 onHoverStation={setHoveredStationId}
                 isLoading={
                   activeLoading ||
-                  ((mainTab === 'longestSegments' || (mainTab === 'speeds' && speedMode === 'segments')) &&
+                  ((mainTab === 'longestSegments' ||
+                    ((mainTab === 'speeds' || mainTab === 'slowest') && speedMode === 'segments')) &&
                     isLoadingTripDetails &&
                     !activeMapConnection)
                 }
@@ -1366,7 +2080,8 @@ export default function App() {
                 onHoverStation={setHoveredStationId}
                 isLoading={
                   activeLoading ||
-                  ((mainTab === 'longestSegments' || (mainTab === 'speeds' && speedMode === 'segments')) &&
+                  ((mainTab === 'longestSegments' ||
+                    ((mainTab === 'speeds' || mainTab === 'slowest') && speedMode === 'segments')) &&
                     isLoadingTripDetails)
                 }
                 highlightedSegment={
